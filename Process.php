@@ -2,7 +2,7 @@
 
 namespace Amp;
 
-class Process {
+class Process implements Promise {
 	private $cmd;
 	private $options;
 	private $proc;
@@ -11,9 +11,7 @@ class Process {
 	private $stdout;
 	private $stderr;
 
-	private $deferred;
 	private $writeDeferreds = [];
-
 	private $writeBuf;
 	private $writeTotal;
 	private $writeCur;
@@ -23,21 +21,20 @@ class Process {
 	const BUFFER_STDERR = 2;
 	const BUFFER_ALL = 3;
 
-	/* $options are passed directly to proc_open(), "cwd" and "env" entries are passed as fourth respectively fifth parameters to proc_open() */
-	public function __construct($cmd, array $options = []) {
-		$this->cmd = $cmd;
-		$this->options = $options;
-	}
+	use Placeholder;
 
 	/**
-	 * @param int $buffer one of the self::BUFFER_* constants. Determines whether it will buffer the stdout and/or stderr data internally
+	 * @param $cmd  string command to be executed
+	 * @param $options array passed directly to proc_open.
+	 *        "cwd" and "env" entries are passed as fourth respectively fifth parameters to proc_open().
+	 *        "buffer" entry must be one of the self::BUFFER_* constants. Determines whether it will buffer the stdout and/or stderr data internally.
 	 * @return Promise is updated with ["out", $data] or ["err", $data] for data received on stdout or stderr
 	 * That Promise will be resolved to a stdClass object with stdout, stderr (when $buffer is true), exit (holding exit code) and signal (only present when terminated via signal) properties
 	 */
-	public function exec($buffer = self::BUFFER_NONE) {
-		if ($this->proc) {
-			throw new \RuntimeException("Process was already launched");
-		}
+	public function __construct($cmd, array $options = []) {
+		$this->cmd = $cmd;
+		$this->options = $options;
+		$buffer = !isset($options["buffer"]) ? self::BUFFER_NONE : $options["buffer"];
 
 		$fds = [["pipe", "r"], ["pipe", "w"], ["pipe", "w"]];
 		$cwd = isset($this->options["cwd"]) ? $this->options["cwd"] : NULL;
@@ -70,13 +67,13 @@ class Process {
 				\Amp\cancel($this->stdin);
 				\Amp\immediately(function() use ($result) {
 					$status = proc_get_status($this->proc);
-					assert($status["running"] === false);
+					\assert($status["running"] === false);
 					if ($status["signaled"]) {
 						$result->signal = $status["termsig"];
 					}
 					$result->exit = $status["exitcode"];
 					$this->proc = NULL;
-					$this->deferred->succeed($result);
+					$this->resolve(null, $result);
 
 					foreach ($this->writeDeferreds as $deferred) {
 						$deferred->fail(new \Exception("Write could not be completed, process finished"));
@@ -85,7 +82,7 @@ class Process {
 				});
 			} else {
 				isset($result->stdout) && $result->stdout .= $data;
-				$this->deferred->update(["out", $data]);
+				$this->update(["out", $data]);
 			}
 		});
 		$this->stderr = \Amp\onReadable($pipes[2], function($watcher, $sock) use ($result) {
@@ -93,7 +90,7 @@ class Process {
 				\Amp\cancel($watcher);
 			} else {
 				isset($result->stderr) && $result->stderr .= $data;
-				$this->deferred->update(["err", $data]);
+				$this->update(["err", $data]);
 			}
 		});
 		$this->stdin = \Amp\onWritable($pipes[0], function($watcher, $sock) {
@@ -108,8 +105,6 @@ class Process {
 				unset($this->writeDeferreds[$next]);
 			}
 		}, ["enable" => false]);
-
-		return $this->deferred->promise();
 	}
 
 	/* Only kills process, Promise returned by exec() will succeed in the next tick */
@@ -130,7 +125,7 @@ class Process {
 		\Amp\cancel($this->stdout);
 		\Amp\cancel($this->stderr);
 		\Amp\cancel($this->stdin);
-		$this->deferred->fail(new \RuntimeException("Process watching was cancelled"));
+		$this->resolve(new \RuntimeException("Process watching was cancelled"));
 
 		foreach ($this->writeDeferreds as $deferred) {
 			$deferred->fail(new \Exception("Write could not be completed, process watching was cancelled"));
